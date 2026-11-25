@@ -1,0 +1,23 @@
+name: gate-rerun
+on:
+  issue_comment:
+    types: [created]
+  workflow_run:
+    workflows: [review-signal]
+    types: [completed]
+permissions:
+  contents: read
+jobs:
+  rerun:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    env:
+      EVENT: ${{ github.event_name }}
+      COMMENT_PR: ${{ github.event.issue.pull_request && github.event.issue.number || '' }}
+      RUN_PRS: ${{ toJson(github.event.workflow_run.pull_requests.*.number) }}
+    steps:
+      - name: Say which pull request this would re-run
+        run: |
+          echo "event=$EVENT"
+          echo "comment_pr=$COMMENT_PR"
+          echo "workflow_run_prs=$RUN_PRS"

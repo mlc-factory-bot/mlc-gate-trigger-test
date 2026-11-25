@@ -1,0 +1,12 @@
+name: review-signal
+on:
+  pull_request_review:
+    types: [submitted]
+permissions: {}
+jobs:
+  signal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Signal that a review was submitted
+        run: "true"
