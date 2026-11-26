@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / '.github/vm_selection.py'
 
 
-class VMSelection(unittest.TestCase):
+class VMFixture(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -54,6 +54,31 @@ class VMSelection(unittest.TestCase):
                 'policy': str(policy or self.policy())}
         args.update(changes)
         return self.invoke('decide', *[part for k, v in args.items() for part in ('--'+k, v)])
+
+
+
+class VMSelection(VMFixture):
+    def test_large_diff_result_can_start_with_bounded_decision(self):
+        for number in range(2500):
+            self.write('bulk/' + str(number).zfill(4) + '-' + 'x'*50 + '.txt', 'data\n')
+        head = self.commit()
+        run = self.decide(head)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertLess(len(run.stdout.encode()), 4096)
+        self.assertEqual(json.loads(run.stdout)['action'], 'run')
+        final = self.invoke('result', '--decision', run.stdout,
+                            '--decide-result', 'success', '--verify-result', 'success',
+                            '--head', head, '--base', self.base)
+        self.assertEqual(final.returncode, 0, final.stderr)
+        import os
+        shell = subprocess.run(['bash', '-e', '-c',
+                                'python3 -I "$SCRIPT" result --decision "$DECISION" '
+                                '--decide-result success --verify-result success '
+                                '--head "$HEAD_SHA" --base "$BASE_SHA"'],
+                               env={**os.environ, 'SCRIPT': str(SCRIPT), 'DECISION': run.stdout,
+                                    'HEAD_SHA': head, 'BASE_SHA': self.base},
+                               text=True, capture_output=True)
+        self.assertEqual(shell.returncode, 0, shell.stderr)
 
     def test_existing_regular_allowlisted_modification_can_skip(self):
         self.write('docs/corpus-analysis/catalogue-gap.md', 'new\n')

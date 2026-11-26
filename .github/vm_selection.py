@@ -76,7 +76,7 @@ def decide(args):
     skip = bool(paths) and eligible and actual == policy['consumer_fingerprint']
     return {'version': 1, 'head': args.head, 'base': args.base,
             'consumer_fingerprint': actual, 'action': 'skip' if skip else 'run',
-            'paths': sorted(paths), 'reason': 'known-non-inputs' if skip else
+            'paths': sorted(paths) if skip else [], 'reason': 'known-non-inputs' if skip else
             ('consumer-inventory-changed' if actual != policy['consumer_fingerprint']
              else 'full-check-required')}
 
