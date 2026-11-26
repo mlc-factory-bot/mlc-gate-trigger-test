@@ -1,0 +1,115 @@
+name: VM selection hosted logic trial
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: vm-selection-trial-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/devcontainers/python@sha256:2e8f59311984aaca0420f515577007db0c9ac61de3e2751f9bdb734f8b5c295c
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Install the hash-pinned YAML test parser
+        run: |
+          python3 -m venv "$RUNNER_TEMP/test-venv"
+          "$RUNNER_TEMP/test-venv/bin/pip" install --no-deps --require-hashes --only-binary=:all: -r .github/trial-test-requirements.txt
+      - run: '"$RUNNER_TEMP/test-venv/bin/python" -m unittest discover -s tests/tooling -v'
+  decide:
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/devcontainers/python@sha256:2e8f59311984aaca0420f515577007db0c9ac61de3e2751f9bdb734f8b5c295c
+    timeout-minutes: 8
+    outputs:
+      decision: ${{ steps.choose.outputs.decision }}
+      base: ${{ steps.choose.outputs.base }}
+      action: ${{ steps.choose.outputs.action }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: refs/heads/main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Trust only this job checkout for native Git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Trusted main selection, bootstrap runs full
+        id: choose
+        shell: bash
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          test "$HEAD_REPO" = "$REPOSITORY"
+          git fetch --no-tags origin "$HEAD_SHA"
+          BASE_SHA="$(git rev-parse HEAD)"
+          export BASE_SHA
+          git merge-base --is-ancestor "$BASE_SHA" "$HEAD_SHA"
+          if test -f .github/vm_selection.py; then
+            decision="$(python3 -I .github/vm_selection.py decide --repo . --base "$BASE_SHA" --head "$HEAD_SHA" --head-repo "$HEAD_REPO" --repository "$REPOSITORY" --policy .github/vm-selection-policy.json)"
+          else
+            decision="$(python3 -c 'import json,os; print(json.dumps(dict(version=1,head=os.environ["HEAD_SHA"],base=os.environ["BASE_SHA"],consumer_fingerprint="0"*64,action="run",paths=[],reason="bootstrap"),separators=(",",":")))')"
+          fi
+          action="$(printf '%s' "$decision" | python3 -c 'import json,sys; print(json.load(sys.stdin)["action"])')"
+          test "$action" = run || test "$action" = skip
+          printf 'decision=%s\nbase=%s\naction=%s\n' "$decision" "$BASE_SHA" "$action" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$decision" >> "$GITHUB_STEP_SUMMARY"
+  simulated_vm:
+    needs: decide
+    if: ${{ needs.decide.outputs.action == 'run' }}
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/devcontainers/python@sha256:2e8f59311984aaca0420f515577007db0c9ac61de3e2751f9bdb734f8b5c295c
+    timeout-minutes: 8
+    steps:
+      - run: echo 'SIMULATED workload only. No NocoBase VM or product verification is proved.'
+  trial-result:
+    needs: [unit, decide, simulated_vm]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/devcontainers/python@sha256:2e8f59311984aaca0420f515577007db0c9ac61de3e2751f9bdb734f8b5c295c
+    timeout-minutes: 8
+    steps:
+      - name: Require trusted checkout identity
+        shell: bash
+        env:
+          DECIDE_RESULT: ${{ needs.decide.result }}
+          BASE_SHA: ${{ needs.decide.outputs.base }}
+        run: |
+          test "$DECIDE_RESULT" = success
+          [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.decide.outputs.base }}
+          persist-credentials: false
+      - name: Trust only this job checkout for native Git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Require actual decision and workload results
+        shell: bash
+        env:
+          DECISION: ${{ needs.decide.outputs.decision }}
+          BASE_SHA: ${{ needs.decide.outputs.base }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          UNIT_RESULT: ${{ needs.unit.result }}
+          DECIDE_RESULT: ${{ needs.decide.result }}
+          VERIFY_RESULT: ${{ needs.simulated_vm.result }}
+        run: |
+          test "$UNIT_RESULT" = success
+          test "$DECIDE_RESULT" = success
+          [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          if test -f .github/vm_selection.py; then
+            python3 -I .github/vm_selection.py result --decision "$DECISION" --decide-result "$DECIDE_RESULT" --verify-result "$VERIFY_RESULT" --head "$HEAD_SHA" --base "$BASE_SHA"
+          else
+            test "$DECIDE_RESULT" = success
+            test "$VERIFY_RESULT" = success
+            python3 -c 'import json,os,re; d=json.loads(os.environ["DECISION"]); assert d==dict(version=1,head=os.environ["HEAD_SHA"],base=os.environ["BASE_SHA"],consumer_fingerprint="0"*64,action="run",paths=[],reason="bootstrap"); assert re.fullmatch("[0-9a-f]{40}",d["head"]) and re.fullmatch("[0-9a-f]{40}",d["base"])'
+          fi
