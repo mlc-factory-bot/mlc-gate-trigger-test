@@ -153,7 +153,8 @@ class VMSelection(unittest.TestCase):
                        {'action': 'skip', 'reason': 'known-non-inputs',
                         'paths': ['scripts/verify.sh']}, {'version': 2}):
             run = self.invoke('result', '--decision', json.dumps({**data, **change}),
-                              '--decide-result', 'success', '--verify-result', 'skipped',
+                              '--decide-result', 'success', '--verify-result',
+                              'success' if change.get('action', data['action']) == 'run' else 'skipped',
                               '--head', self.base, '--base', self.base)
             self.assertNotEqual(run.returncode, 0)
 
