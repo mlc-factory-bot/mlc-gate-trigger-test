@@ -53,6 +53,47 @@ class WorkflowContract(VMFixture):
                               cwd=self.repo, env={**os.environ, **values},
                               text=True, capture_output=True)
 
+    def test_workflow_maps_actual_identity_outputs_and_job_results(self):
+        jobs = self.workflow()['jobs']
+        choose = self.step('decide', 'Trusted main selection, bootstrap runs full')
+        self.assertEqual(choose['env'], {
+            'HEAD_SHA': '${{ github.event.pull_request.head.sha }}',
+            'HEAD_REPO': '${{ github.event.pull_request.head.repo.full_name }}',
+            'REPOSITORY': '${{ github.repository }}'})
+        self.assertEqual(jobs['decide']['outputs'], {
+            'decision': '${{ steps.choose.outputs.decision }}',
+            'base': '${{ steps.choose.outputs.base }}',
+            'action': '${{ steps.choose.outputs.action }}'})
+        guard = self.step('trial-result', 'Require trusted checkout identity')
+        self.assertEqual(guard['env'], {
+            'DECIDE_RESULT': '${{ needs.decide.result }}',
+            'BASE_SHA': '${{ needs.decide.outputs.base }}'})
+        final = self.step('trial-result', 'Require actual decision and workload results')
+        self.assertEqual(final['env'], {
+            'DECISION': '${{ needs.decide.outputs.decision }}',
+            'BASE_SHA': '${{ needs.decide.outputs.base }}',
+            'HEAD_SHA': '${{ github.event.pull_request.head.sha }}',
+            'UNIT_RESULT': '${{ needs.unit.result }}',
+            'DECIDE_RESULT': '${{ needs.decide.result }}',
+            'VERIFY_RESULT': '${{ needs.simulated_vm.result }}'})
+        checkout = next(s for s in jobs['trial-result']['steps'] if 'uses' in s)
+        self.assertEqual(checkout['with'], {
+            'ref': '${{ needs.decide.outputs.base }}', 'persist-credentials': False})
+        self.assertLess(jobs['trial-result']['steps'].index(guard),
+                        jobs['trial-result']['steps'].index(checkout))
+
+    def test_actual_final_shell_refuses_checkout_other_than_decided_base(self):
+        step = self.step('trial-result', 'Require actual decision and workload results')
+        decided_base = self.base
+        self.write('scripts/verify.sh', 'another checkout\n')
+        self.commit()
+        decision = dict(version=1, head=decided_base, base=decided_base,
+                        consumer_fingerprint='0'*64, action='run', paths=[], reason='bootstrap')
+        run = self.shell(step['run'], UNIT_RESULT='success', DECIDE_RESULT='success',
+                         VERIFY_RESULT='success', BASE_SHA=decided_base,
+                         HEAD_SHA=decided_base, DECISION=json.dumps(decision))
+        self.assertNotEqual(run.returncode, 0)
+
     def test_required_workflow_dependencies_and_shell_cannot_silently_skip(self):
         jobs = self.workflow()['jobs']
         self.assertEqual(jobs['trial-result']['needs'], ['unit', 'decide', 'simulated_vm'])
