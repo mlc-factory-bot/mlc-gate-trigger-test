@@ -156,3 +156,57 @@ class WorkflowContract(VMFixture):
         run = self.shell(step['run'], **{**env, 'HEAD_SHA':head})
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertNotIn('PR classifier reached', run.stderr)
+
+    def test_actual_adopted_main_producer_and_result_ignore_pr_control_code(self):
+        choose = self.step('decide', 'Trusted main selection, bootstrap runs full')['run']
+        final = self.step('trial-result', 'Require actual decision and workload results')['run']
+        self.write('.github/vm_selection.py', SCRIPT.read_text())
+        source = self.commit()
+        fingerprint = self.invoke('fingerprint', '--repo', str(self.repo), '--ref', source)
+        self.assertEqual(fingerprint.returncode, 0, fingerprint.stderr)
+        self.write('.github/vm-selection-policy.json', json.dumps({
+            'version': 1, 'consumer_fingerprint': fingerprint.stdout.strip()}))
+        trusted_base = self.commit()
+        self.git('remote', 'add', 'origin', str(self.repo))
+        # The hostile classifier would make a code change look like a valid skip.
+        hostile = '''import json,sys
+args=sys.argv
+value=lambda name:args[args.index(name)+1]
+print(json.dumps(dict(version=1,head=value('--head'),base=value('--base'),
+ consumer_fingerprint='0'*64,action='skip',reason='known-non-inputs',
+ paths=['docs/corpus-analysis/catalogue-gap.md'])))
+'''
+        for change in ('docs', 'mixed-code', 'pr-classifier', 'pr-policy'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as artifacts:
+                self.git('checkout', '--detach', trusted_base)
+                self.write('docs/corpus-analysis/catalogue-gap.md', change+'\n')
+                if change == 'mixed-code':
+                    self.write('scripts/verify.sh', 'false\n')
+                elif change == 'pr-classifier':
+                    self.write('.github/vm_selection.py', hostile)
+                elif change == 'pr-policy':
+                    self.write('.github/vm-selection-policy.json', 'INVALID PR POLICY\n')
+                head = self.commit()
+                self.assertNotEqual(head, trusted_base)
+                self.git('checkout', '--detach', trusted_base)
+                output, summary = Path(artifacts)/'output', Path(artifacts)/'summary'
+                run = self.shell(choose, HEAD_SHA=head, HEAD_REPO='owner/repo',
+                                 REPOSITORY='owner/repo', GITHUB_OUTPUT=str(output),
+                                 GITHUB_STEP_SUMMARY=str(summary), RUNNER_TEMP=artifacts)
+                self.assertEqual(run.returncode, 0, run.stderr)
+                outputs = dict(line.split('=', 1) for line in output.read_text().splitlines())
+                decision = json.loads(outputs['decision'])
+                expected = 'skip' if change == 'docs' else 'run'
+                self.assertEqual(outputs['action'], expected)
+                self.assertEqual(outputs['base'], trusted_base)
+                self.assertEqual(decision['base'], trusted_base)
+                self.assertEqual(decision['head'], head)
+                self.assertEqual(decision['action'], expected)
+                self.assertNotEqual(decision['reason'], 'bootstrap')
+                for workload in ('success', 'skipped', 'failure', 'cancelled', ''):
+                    result = self.shell(final, UNIT_RESULT='success', DECIDE_RESULT='success',
+                                        VERIFY_RESULT=workload, BASE_SHA=outputs['base'],
+                                        HEAD_SHA=head, DECISION=outputs['decision'])
+                    self.assertEqual(result.returncode == 0,
+                                     workload == ('skipped' if expected == 'skip' else 'success'),
+                                     (change, workload, result.stderr))
