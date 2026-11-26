@@ -69,7 +69,7 @@ jobs:
       image: mcr.microsoft.com/devcontainers/python@sha256:2e8f59311984aaca0420f515577007db0c9ac61de3e2751f9bdb734f8b5c295c
     timeout-minutes: 8
     steps:
-      - run: echo 'SIMULATED workload only. No NocoBase VM or product verification is proved.'
+      - run: echo 'Intentional synthetic workload failure'; exit 23
   trial-result:
     needs: [unit, decide, simulated_vm]
     if: ${{ always() }}
